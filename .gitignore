@@ -1,0 +1,12 @@
+# Packed VM blobs — large (300-400 MB each), rebuilt from .smolfile + recipe.
+*.smolmachine
+
+# Standalone pack-stub binaries — same content as the .smolmachine, just
+# wrapped in a runner. ~33 MB each. Re-emitted by `smolvm pack create`.
+# Anchored to the repo root so they don't clash with any future subdirs.
+/ubuntu-dev
+/bun-dev
+/bun-only
+
+# macOS
+.DS_Store
