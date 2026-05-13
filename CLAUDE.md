@@ -48,7 +48,9 @@ one-off use cases that genuinely need it, drop to raw `smolvm machine create
 | `dev-instance` | Bash CLI: `create`, `shell`, `stop`, `rm`, `ls`, `build`, `new-blueprint`. Per-project sandbox lifecycle on top of smolvm, plus blueprint build + scaffolding. |
 | `blueprints/<name>/build.sh` | One-shot build script per blueprint. Creates the source VM from a base image, installs distro-specific tooling, sources `_install-agents.sh` for the three agent CLIs, stops the VM, and packs it into `dist/<name>.smolmachine`. |
 | `blueprints/<name>/pack.smolfile` | TOML config consumed by `smolvm pack create -s`. Currently just `net = true` (bakes outbound networking into the packed artifact). Required — `pack create` has no `--net` flag. |
-| `blueprints/_install-agents.sh` | Shared installer (piped into the VM via `bash -s`) that installs Claude Code + Codex + OpenCode and writes `/etc/profile.d/agents-banner.sh`. One file, edited once, picked up by every blueprint. |
+| `blueprints/_install-agents.sh` | Shared installer for Claude Code + Codex + OpenCode + `/etc/profile.d/agents-banner.sh`. Copied into the VM via `smolvm machine cp`, then run via `smolvm machine exec -- bash /tmp/_install-agents.sh` (`bash -s < file` doesn't work — smolvm exec doesn't forward host stdin). One file, edited once, picked up by every blueprint. |
+| `blueprints/_install-user.sh` | Drops `/usr/local/sbin/match-host-uid.sh` into the VM at build time. That script runs on every VM start (via smolvm `--init` set by `dev-instance create`) and creates a `dev` user matching `$HOST_UID`/`$HOST_GID`. Same `cp + exec` plumbing as `_install-agents.sh`. |
+| `CHANGELOG.md` | Keep-a-Changelog format. Update the `[Unreleased]` / next-version section as part of any user-visible change. |
 | `wip/issue-fedora-overlay*.md` | Bug report and follow-up comment filed upstream as [smol-machines/smolvm#263](https://github.com/smol-machines/smolvm/issues/263). Kept as reference until the fix lands — no Fedora blueprint until then. |
 | `LICENSE` | MIT. |
 | `.gitignore` | Excludes `dist/` plus any stray `.smolmachine` and legacy pack-stub binaries at the repo root. |
@@ -78,7 +80,8 @@ cd ~/code/proj-foo
 #    as ~/workspace. Clone is auto-named "proj-foo-<4 hex>" and printed.
 dev-instance create
 
-# 3. Drop in — bun, claude, git all ready, cwd is ~/workspace
+# 3. Drop in — bun, all three agent CLIs (claude/codex/opencode), git
+#    all ready, cwd is ~/workspace, user is `dev` (uid matches host).
 dev-instance shell
 
 # 4. On the host: review and push at your own pace
@@ -108,18 +111,24 @@ dev-instance create --image python:3.11-slim
 dev-instance shell
 ```
 
-No Claude Code preinstalled in this mode; you install whatever you need
-inside, or build a proper blueprint if it's something you'll reuse. Same
-lifecycle as blueprint-mode (`shell` / `stop` / `rm`).
+No agent CLIs preinstalled in this mode (and no `dev` user — `--image`
+clones run as root in `/root/workspace`). Install whatever you need
+inside, or build a proper blueprint via `dev-instance new-blueprint`
+if it's something you'll reuse. Same lifecycle as blueprint-mode
+(`shell` / `stop` / `rm`).
 
 ### Mount notes
 
 - Files the VM creates inside `~/workspace` show up on the host immediately,
   in the same directory. No `machine cp` round-trip.
-- The VM runs as root, so files written from inside will be owned by root
-  on Linux hosts (on macOS / APFS the mapping is more forgiving). If you
-  need host-uid ownership, `chown -R $(id -u):$(id -g) ~/code/proj-foo`
-  after the session.
+- Blueprint clones run as a `dev` user whose uid/gid are aligned to the
+  host user's at every VM start (via `HOST_UID`/`HOST_GID` env vars and
+  `--init /usr/local/sbin/match-host-uid.sh`). Files written inside
+  `~/workspace` (= `/home/dev/workspace`) therefore appear with the
+  host user's ownership on the host filesystem — no post-session
+  `chown` needed. `dev` has passwordless sudo for the times an agent
+  decides it needs `apt install`. `--image` clones don't have this
+  setup and run as root in `/root/workspace`.
 - Anything *outside* `~/workspace` stays in the per-clone overlay and is
   thrown away on `dev-instance rm`. Good for ephemeral build caches and
   experiments; bad for anything you want to keep.
@@ -185,7 +194,9 @@ Two common patterns:
    ```bash
    smolvm machine create my-proj-abcd \
      --from ~/dev-instances/dist/bun-only.smolmachine --net \
-     -v "$PWD:/root/workspace" -w /root/workspace \
+     -v "$PWD:/home/dev/workspace" -w /home/dev/workspace \
+     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+     --init /usr/local/sbin/match-host-uid.sh \
      -e ANTHROPIC_API_KEY -e OPENAI_API_KEY
    ```
 2. **Keep a `.env` in the project** — gitignored, mounted via `~/workspace`,
@@ -230,19 +241,17 @@ when you `dev-instance shell` into a clone.
 ## Building a blueprint
 
 Each blueprint has a self-contained build script at
-`blueprints/<name>/build.sh`. Each script:
+`blueprints/<name>/build.sh`. Behavior:
 
-1. Refuses to run if a source VM of the same name already exists (the
-   error message tells you to either `smolvm machine delete <name> -f`
-   for a clean rebuild, or to update in place — see next section).
-2. `smolvm machine create <name> --image <base> --net`.
-3. `smolvm machine exec` to install everything inside.
-4. `smolvm machine stop`.
-5. `smolvm pack create --from-vm <name> -s blueprints/<name>/pack.smolfile
-   -o dist/<name>` — writes `dist/<name>.smolmachine` (and a stub binary).
-
-Takes 5-10 minutes per blueprint, mostly download time. No `--ssh-agent`
-needed — installs only fetch over HTTPS.
+- **Source VM doesn't exist** → create it from the base image, install
+  distro prereqs (incl. `sudo`, needed for the `dev` user's sudoers
+  file), then `cp + exec` the two shared installers (`_install-user.sh`
+  + `_install-agents.sh`), then stop and pack.
+- **Source VM already exists** → just re-pack it as-is into
+  `dist/<name>.smolmachine`. Fast (~seconds), no install step.
+- **`--rebuild` passed** → delete the existing source VM first, then
+  fall through to the "doesn't exist" path. Full rebuild from base
+  image (~5-10 min).
 
 Run via the CLI:
 
@@ -251,13 +260,15 @@ dev-instance build              # default: bun-only
 dev-instance build bun-dev
 dev-instance build ubuntu-dev
 dev-instance build --all        # iterates over all blueprints/*/build.sh
+dev-instance build bun-only --rebuild   # full clean rebuild
 ```
 
-The scripts at `blueprints/<name>/build.sh` are also directly executable
-if you'd rather skip the wrapper.
+No `--ssh-agent` needed during the build — installs only fetch over
+HTTPS. The scripts at `blueprints/<name>/build.sh` are also directly
+executable if you'd rather skip the wrapper.
 
 The source VMs stay in `~/Library/Caches/smolvm/vms/` after the build —
-that's what makes incremental updates possible.
+that's what makes incremental updates (next section) possible.
 
 ## Updating a blueprint
 
@@ -292,16 +303,26 @@ dev-instance new-blueprint my-python --image python:3.11-slim
 ```
 
 This writes `blueprints/my-python/build.sh` and `pack.smolfile`. The
-generated `build.sh` does package-manager autodetect (apt / apk / dnf /
-yum), installs `curl` + `ca-certificates`, runs the native Claude Code
-installer, and symlinks the binary into `/usr/local/bin`. Add tools your
-projects need (Node, Bun, Python libs, etc.) in the marked block, then
-run the script and `dev-instance create my-python`.
+generated `build.sh`:
+
+1. Auto-detects the package manager (apt / apk / dnf / yum) and
+   installs the minimum prereqs (`curl`, `ca-certificates`, `bash`,
+   `sudo`).
+2. Has a clearly-marked "Add your custom installs here" block where
+   you put project-specific tools (Node, Bun, Python libs, etc.).
+3. `cp + exec`s the same shared installers as the shipped blueprints:
+   `_install-user.sh` (the `dev` user + uid-matching runtime script)
+   then `_install-agents.sh` (Claude Code + Codex + OpenCode +
+   banner).
+
+So a scaffolded blueprint behaves exactly like the shipped ones: same
+`dev` user, same three agent CLIs, same lifecycle via `dev-instance
+create / shell / stop / rm`.
 
 The scaffolder is dumb on purpose — it doesn't try to detect what's
 already in the image. For images that already ship Node or Bun (like
-`oven/bun:slim`), the apt-get install of `curl ca-certificates` is a
-no-op, so you don't have to remove anything; just add your installs.
+`oven/bun:slim`), the prereq install is essentially a no-op; just add
+your project tools in the marked block.
 
 Naming: `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. The scaffolder refuses to
 overwrite an existing `blueprints/<name>/`.
@@ -332,9 +353,10 @@ overwrite an existing `blueprints/<name>/`.
   by the overlay (the virtiofs mount is still there underneath, but
   invisible). Confirmed by `mount` inside a clone: `smolvm0 on
   /workspace type virtiofs` followed by `/dev/vda on /workspace type
-  ext4`. We mount under `~/workspace` (= `/root/workspace`, since the
-  VM runs as root) to dodge the collision. If smolvm ever stops
-  claiming `/workspace`, we can switch back.
+  ext4`. We mount under `~/workspace` (= `/home/dev/workspace`, since
+  blueprint clones run as the `dev` user; `/root/workspace` for
+  `--image` clones running as root). If smolvm ever stops claiming
+  `/workspace`, we can switch back.
 - **No daemon mode inside clones.** smolvm currently can't run a
   long-lived service (like sshd) inside a `machine create`-style
   persistent VM — processes started by `--init` are reaped when init
@@ -342,14 +364,18 @@ overwrite an existing `blueprints/<name>/`.
   the VM proper. Implication: VS Code Remote-SSH / JetBrains Gateway
   into clones is not possible today. Interact via `dev-instance shell`
   (which wraps `smolvm machine exec -it`).
-- **Native Claude installer drops the binary under `$HOME`.** The exact
-  path is `claude install`'s decision and may shift between versions.
-  All three build scripts probe common locations (`/root/.local/bin`,
-  `/root/.claude/...`) and fall back to a depth-limited `find`, then
-  symlink the result into `/usr/local/bin/claude` so non-login
-  `smolvm machine exec` sessions can find it. If the installer ever
-  starts dropping the binary somewhere truly unexpected, that probe is
-  the first thing to update.
+- **Agent installers drop binaries under `$HOME`.** Both the Claude
+  Code installer (`claude.ai/install.sh`) and the OpenCode installer
+  (`opencode.ai/install`) decide their target dir at install time and
+  can shift between versions. `_install-agents.sh` probes common
+  locations (`$HOME/.local/bin`, `$HOME/.claude/...`,
+  `$HOME/.opencode/bin`, `$HOME/bin`), falls back to a depth-limited
+  `find`, and symlinks each binary into `/usr/local/bin` so non-login
+  `smolvm machine exec` sessions can find it. (Codex doesn't need
+  this — we grab the prebuilt musl tarball from GH Releases and place
+  the binary in `/usr/local/bin` ourselves.) If an installer ever
+  starts dropping its binary somewhere truly unexpected, that probe
+  is the first thing to update.
 - **Per-clone overlay disk: ~430 MB.** Each clone takes a copy-on-write
   overlay. Use `dev-instance ls --all` to see active overlays;
   `dev-instance rm <name>` reclaims disk.

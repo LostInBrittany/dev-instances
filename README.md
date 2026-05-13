@@ -1,24 +1,41 @@
 # dev-instances
 
-Recipes for three small Linux VMs I use to run autonomous coding agents —
-Claude Code, OpenAI's Codex CLI, and OpenCode — without giving them access
-to my host filesystem. Each VM is a packed
-[smolvm](https://github.com/smol-machines/smolvm) blueprint (`.smolmachine`)
-that can be cloned in ~1 second for per-project, throwaway sandboxes, plus a
-small `dev-instance` CLI for the lifecycle.
+A toolkit for running autonomous coding agents (Claude Code, OpenAI's
+Codex CLI, OpenCode, …) inside per-project ephemeral Linux VMs, without
+giving them access to your host filesystem. Each sandbox clones a
+prebuilt [smolvm](https://github.com/smol-machines/smolvm) blueprint in
+~1 second, mounts your project at `~/workspace`, and runs as a `dev`
+user whose uid/gid match the host — so file ownership stays correct
+both ways.
 
-All three agent CLIs are preinstalled in every blueprint — pick whichever you
-like at shell time, or use whatever combination your project benefits from.
-The original itch was `claude --dangerously-skip-permissions`; the broader
-need is "any agent with shell access in a place I'm comfortable letting it
-loose."
+What's in the box:
 
-Companion repo for an upcoming talk and blog post on sandboxing agent CLIs
-with smolvm. Links coming soon — feel free to clone and adapt in the meantime.
+- **`dev-instance`** — the per-project lifecycle CLI: `create`, `shell`,
+  `stop`, `rm`, `ls`, `build`, `new-blueprint`.
+- **Three example blueprints** as starting points — `ubuntu-dev`,
+  `bun-dev`, `bun-only`. Build the one(s) you'll use; the others can
+  wait. (Or ignore them entirely and scaffold your own.)
+- **Shared installers** in `blueprints/_install-{user,agents}.sh` that
+  every blueprint — shipped *or* scaffolded — sources. They set up the
+  host-uid-matching `dev` user and preinstall Claude Code + Codex CLI
+  + OpenCode into `/usr/local/bin/`.
+- **`dev-instance new-blueprint NAME --image IMG`** — scaffold your own
+  blueprint from any OCI image (`python:3.11-slim`, `golang:1.22`,
+  whatever). The scaffolded `build.sh` inherits the same dev-user +
+  three-agent setup; you just add the project-specific tools.
 
-The packed blueprints themselves aren't committed (hundreds of MB each); they
-rebuild quickly from the scripts in `blueprints/`. **Newcomers: build a
-blueprint first, then use `dev-instance` for per-project work.**
+The original itch was `claude --dangerously-skip-permissions`; the
+broader goal is "any agent with shell access in a place I'm comfortable
+letting it loose."
+
+Companion repo for an upcoming talk and blog post on sandboxing agent
+CLIs with smolvm. Links coming soon — feel free to clone and adapt in
+the meantime.
+
+Packed blueprints (`.smolmachine`, hundreds of MB each) aren't committed
+— they rebuild quickly from the scripts in `blueprints/`. **Newcomers:
+do the prereqs, build a blueprint, put `dev-instance` on your PATH,
+then use it per-project.**
 
 ## Prerequisites
 
@@ -65,7 +82,12 @@ inside gets prompt-injected or goes off the rails, the blast radius is the
 project folder — not your GitHub account, not your other repos, not your
 remote infrastructure.
 
-## Blueprints
+## The shipped blueprints
+
+Three Node/Bun-oriented blueprints come with the repo as examples /
+starting points. None of them is the "right" blueprint for every
+project — they're representative shapes. If your project needs a
+different base, [scaffold one](#making-your-own-blueprint).
 
 | Blueprint | Base | Real Node | Bun | Pack | Pick when |
 |---|---|---|---|---|---|
@@ -73,30 +95,35 @@ remote infrastructure.
 | `bun-dev` | Debian 13 (`oven/bun:slim`) | yes (Node 24) | yes | 386 MB | Bun-first projects, but keep Node as a safety net for npm CLIs that hit Node-specific APIs. |
 | `bun-only` | Debian 13 (`oven/bun:slim`) | shim (`node` → `bun`) | yes | 307 MB | Strictly Bun. Saves ~80 MB. `#!/usr/bin/env node` shebangs fall back to Bun's Node-compat mode. |
 
-All three include three agent CLIs (Claude Code, Codex CLI, OpenCode), git,
-curl, ca-certificates, unzip, and build tools for native modules. When you
-`dev-instance shell` into a clone, you'll see an `Available agents: claude
-codex opencode` banner; pick whichever you want by typing the command.
+All three include the three agent CLIs (Claude Code, Codex CLI,
+OpenCode), git, curl, ca-certificates, unzip, build tools, and sudo
+(for the `dev` user). On `dev-instance shell` you'll see an
+`Available agents: claude codex opencode` banner; pick whichever you
+want by typing the command.
 
 ## What's in this repo
 
 ```
 dev-instances/
-├── dev-instance              # per-project sandbox CLI (bash)
+├── dev-instance                      # per-project sandbox CLI (bash)
 ├── blueprints/
+│   ├── _install-user.sh              # shared: dev user + uid-matching
+│   ├── _install-agents.sh            # shared: Claude + Codex + OpenCode
 │   ├── ubuntu-dev/   { build.sh, pack.smolfile }
 │   ├── bun-dev/      { build.sh, pack.smolfile }
 │   └── bun-only/     { build.sh, pack.smolfile }
-├── dist/                     # build output (git-ignored)
-├── wip/                      # upstream fedora-issue drafts (until smolvm#263 lands)
+├── dist/                             # build output (git-ignored)
+├── wip/                              # upstream fedora-issue drafts (smolvm#263)
 ├── README.md
-├── CLAUDE.md                 # full reference + Claude Code project memory
+├── CLAUDE.md                         # full reference + Claude Code project memory
+├── CHANGELOG.md
 └── LICENSE
 ```
 
 `CLAUDE.md` is the long-form reference: per-blueprint contents, mount notes,
 known limitations, security nuance. It also doubles as Claude Code's project
-memory when you open this directory in a Claude session.
+memory when you open this directory in a Claude session. `CHANGELOG.md`
+tracks user-visible changes in Keep-a-Changelog format.
 
 ## Building a blueprint
 
@@ -222,6 +249,24 @@ dev-instance rm
 no name needed. Pass `--all` to `dev-instance ls` to see every clone, not
 just the ones from this dir.
 
+### Host-matching user inside the VM
+
+You're not root inside a blueprint clone — `dev-instance` creates a `dev`
+user whose uid/gid match your host user's (passed via `HOST_UID`/`HOST_GID`
+env vars and applied by `/usr/local/sbin/match-host-uid.sh` at every VM
+start). The point is **bidirectional file ownership**: files you create
+on the host show up as `dev`-owned in the VM, and files agents create in
+`~/workspace` from inside the VM show up with *your* uid/gid on the host
+— no post-session `chown` dance.
+
+`dev` has passwordless sudo, so an agent that decides it needs
+`sudo apt install foo` to finish a task can do that without prompting.
+
+The `--image` escape hatch below doesn't have this setup — those clones
+run as root in `/root/workspace` (the original behavior). The fix is
+blueprint-only because the runtime user-matching script ships in the
+blueprint, not in arbitrary OCI images.
+
 ### Custom OCI image (escape hatch)
 
 If a prebuilt blueprint doesn't fit, point `dev-instance` at any OCI image
@@ -259,7 +304,9 @@ Two clean ways to wire them up:
 # Option 1: forward from the host shell at create time
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY OPENAI_API_KEY=$OPENAI_API_KEY \
   smolvm machine create my-proj-abcd --from ~/dev-instances/dist/bun-only.smolmachine \
-    --net -v "$PWD:/root/workspace" -w /root/workspace \
+    --net -v "$PWD:/home/dev/workspace" -w /home/dev/workspace \
+    -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+    --init /usr/local/sbin/match-host-uid.sh \
     -e ANTHROPIC_API_KEY -e OPENAI_API_KEY
 # (dev-instance create doesn't currently forward env; use raw smolvm if you
 #  want this until that surface lands.)

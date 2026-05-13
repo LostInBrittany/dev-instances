@@ -60,7 +60,7 @@ else
 
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-      git curl unzip ca-certificates gnupg build-essential
+      git curl unzip ca-certificates gnupg build-essential sudo
 
     # Node 24 via NodeSource (for user projects; agents use their own binaries).
     mkdir -p /etc/apt/keyrings
@@ -73,9 +73,18 @@ EOF
     apt-get install -y -qq nodejs
     '
 
+    # Runtime user-matching script (drops /usr/local/sbin/match-host-uid.sh
+    # in the VM; invoked by `dev-instance create` via smolvm --init).
+    # Use `cp + exec` instead of `bash -s < file` because smolvm exec
+    # doesn't forward stdin without -i (and -i is interactive-flavored).
+    echo "==> Installing user-matching runtime script..."
+    smolvm machine cp "$REPO_ROOT/blueprints/_install-user.sh" "$NAME:/tmp/_install-user.sh"
+    smolvm machine exec --name "$NAME" -- bash /tmp/_install-user.sh
+
     # Agent CLIs (Claude Code + Codex + OpenCode) via the shared installer.
     echo "==> Installing agents..."
-    smolvm machine exec --name "$NAME" -- bash -s < "$REPO_ROOT/blueprints/_install-agents.sh"
+    smolvm machine cp "$REPO_ROOT/blueprints/_install-agents.sh" "$NAME:/tmp/_install-agents.sh"
+    smolvm machine exec --name "$NAME" -- bash /tmp/_install-agents.sh
 
     smolvm machine stop --name "$NAME"
 fi

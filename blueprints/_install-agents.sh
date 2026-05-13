@@ -50,13 +50,13 @@ case "$ARCH" in
     *) echo "ERROR: unsupported arch '$ARCH' for Codex" >&2; exit 1 ;;
 esac
 
-# Latest release tarball URL via the GitHub API. grep/sed instead of jq
-# so the VM doesn't need an extra dependency.
+# Latest release tarball URL via the GitHub API. The API returns JSON on a
+# single line, so the previous grep-by-line / sed pipeline matched the wrong
+# URL. Use grep -oE to extract URLs directly without depending on line
+# structure (no jq dependency).
 CODEX_URL=$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest \
-    | grep '"browser_download_url"' \
-    | grep "codex-${CODEX_TRIPLE}\\.tar\\.gz" \
-    | head -1 \
-    | sed 's/.*"\(https:[^"]*\)".*/\1/')
+    | grep -oE "https://[^\"]+codex-${CODEX_TRIPLE}\\.tar\\.gz" \
+    | head -1)
 
 [ -n "$CODEX_URL" ] || { echo "ERROR: no Codex Linux/musl release for $ARCH" >&2; exit 1; }
 
@@ -76,7 +76,20 @@ command -v codex >/dev/null
 # OpenCode (sst/opencode)
 # ---------------------------------------------------------------------
 echo "==> Installing OpenCode..."
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
+curl -fsSL https://opencode.ai/install | bash
+
+# Same probe-and-symlink dance as Claude — the installer's destination
+# can vary ($OPENCODE_INSTALL_DIR / $XDG_BIN_DIR / $HOME/bin /
+# $HOME/.opencode/bin) and not all of those are on the non-login PATH.
+OPENCODE_BIN=""
+for d in /root/.opencode/bin /root/.local/bin /root/bin; do
+    if [ -x "$d/opencode" ]; then OPENCODE_BIN="$d/opencode"; break; fi
+done
+if [ -z "$OPENCODE_BIN" ]; then
+    OPENCODE_BIN=$(find /root -maxdepth 6 -name opencode -executable 2>/dev/null | head -1 || true)
+fi
+[ -n "$OPENCODE_BIN" ] || { echo "ERROR: opencode binary not found after install" >&2; exit 1; }
+ln -sf "$OPENCODE_BIN" /usr/local/bin/opencode
 command -v opencode >/dev/null
 
 # ---------------------------------------------------------------------
