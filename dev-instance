@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+#
+# dev-instance — per-project sandbox manager built on smolvm.
+#
+# Creates, manages, and destroys per-project VM clones from prebuilt
+# blueprints (or any OCI image). Mounts $PWD into the clone as
+# ~/workspace (= /root/workspace). No credentials enter the clone by
+# default.
+#
+# Repo location is auto-detected from this script's path (so symlinks
+# into ~/.local/bin/ work). Override with $DEV_INSTANCES_ROOT.
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+dev-instance — per-project sandbox manager built on smolvm.
+
+Usage:
+  dev-instance create [BLUEPRINT]      Create + start a clone from a blueprint
+                                       (default: bun-only).
+  dev-instance create --image IMG      Create + start a clone from any OCI image
+                                       (no Claude Code preinstalled).
+  dev-instance shell [NAME]            Exec into a clone (auto-detected from
+                                       cwd if exactly one matches).
+  dev-instance stop  [NAME]            Stop a running clone.
+  dev-instance rm    [NAME]            Delete a clone (also stops if running).
+  dev-instance ls    [--all]           List clones for cwd, or all clones.
+  dev-instance build [BLUEPRINT] [--rebuild]
+                                       Build a blueprint (default: bun-only).
+                                       Re-packs the existing source VM if
+                                       one exists; --rebuild to start fresh
+                                       from the base image.
+  dev-instance build --all [--rebuild] Build every blueprint in blueprints/.
+  dev-instance new-blueprint NAME --image IMG
+                                       Scaffold blueprints/NAME/ with a
+                                       build.sh that installs Claude Code on
+                                       top of IMG. Edit it to add your tools,
+                                       then run it.
+  dev-instance help                    This message.
+
+Clones are auto-named "<cwd-basename>-<4 hex>". $PWD is mounted as
+~/workspace; `dev-instance shell` lands you there.
+EOF
+}
+
+die() { echo "dev-instance: $*" >&2; exit 1; }
+
+need_smolvm() {
+    command -v smolvm >/dev/null 2>&1 && return
+    cat >&2 <<'EOF'
+dev-instance: smolvm is not installed or not on PATH.
+
+  Install:  brew tap smol-machines/tap && brew install smolvm
+  Or:       https://github.com/smol-machines/smolvm
+
+This tool wraps smolvm to manage per-project sandbox VMs; nothing
+beyond `help` and `new-blueprint` works without it.
+EOF
+    exit 1
+}
+
+# Resolve repo root: env var wins, else follow symlinks from $0.
+if [[ -n "${DEV_INSTANCES_ROOT:-}" ]]; then
+    REPO_ROOT="$DEV_INSTANCES_ROOT"
+else
+    SCRIPT_PATH="$0"
+    while [[ -L "$SCRIPT_PATH" ]]; do
+        TARGET="$(readlink "$SCRIPT_PATH")"
+        case "$TARGET" in
+            /*) SCRIPT_PATH="$TARGET" ;;
+            *)  SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$TARGET" ;;
+        esac
+    done
+    REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+fi
+DIST="$REPO_ROOT/dist"
+
+generate_name() {
+    echo "$(basename "$PWD")-$(openssl rand -hex 2)"
+}
+
+# All VM names known to smolvm. Uses --json because the plain `ls` output
+# truncates the NAME column at ~16 chars + "..." and uses space-padded
+# columns, which makes substring matching unreliable.
+all_vm_names() {
+    smolvm machine ls --json 2>/dev/null \
+        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | sed -E 's/.*"([^"]*)"$/\1/'
+}
+
+# Names of all clones that look like they belong to $PWD (prefix-<4 hex>).
+# Empty (not an error) if no matches.
+clones_for_cwd() {
+    local prefix
+    prefix="$(basename "$PWD")-"
+    all_vm_names \
+        | grep -E "^${prefix}[0-9a-f]{4}$" \
+        | sort -u \
+        || true
+}
+
+# Resolve clone name from optional argument; auto-detect from $PWD if absent.
+resolve_name() {
+    local arg="${1:-}"
+    if [[ -n "$arg" ]]; then
+        echo "$arg"; return
+    fi
+    local matches; matches="$(clones_for_cwd)"
+    local count; count="$(printf '%s' "$matches" | grep -c . || true)"
+    if [[ "$count" == "0" ]]; then
+        die "no clone found for $(basename "$PWD"). Run: dev-instance create"
+    elif [[ "$count" == "1" ]]; then
+        echo "$matches"
+    else
+        echo "dev-instance: multiple clones for $(basename "$PWD"):" >&2
+        echo "$matches" | sed 's/^/  /' >&2
+        die "specify a name explicitly"
+    fi
+}
+
+cmd_create() {
+    local blueprint="" image=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --image) image="${2:-}"; shift 2 || die "--image needs a value" ;;
+            -h|--help) usage; return 0 ;;
+            -*) die "unknown flag: $1" ;;
+            *)  blueprint="$1"; shift ;;
+        esac
+    done
+    [[ -n "$blueprint" && -n "$image" ]] && die "pass a blueprint OR --image, not both"
+
+    local name; name="$(generate_name)"
+
+    if [[ -n "$image" ]]; then
+        smolvm machine create "$name" --image "$image" --net \
+            -v "$PWD:/root/workspace" -w /root/workspace
+    else
+        blueprint="${blueprint:-bun-only}"
+        local pack="$DIST/${blueprint}.smolmachine"
+        [[ -f "$pack" ]] || die "blueprint '$blueprint' not built. Run: dev-instance build $blueprint"
+        smolvm machine create "$name" --from "$pack" --net \
+            -v "$PWD:/root/workspace" -w /root/workspace
+    fi
+
+    smolvm machine start --name "$name"
+    echo "$name"
+}
+
+cmd_shell() {
+    local name; name="$(resolve_name "${1:-}")"
+    exec smolvm machine exec --name "$name" -w /root/workspace -it -- bash -l
+}
+
+cmd_stop() {
+    local name; name="$(resolve_name "${1:-}")"
+    smolvm machine stop --name "$name"
+}
+
+cmd_rm() {
+    local name; name="$(resolve_name "${1:-}")"
+    smolvm machine stop --name "$name" 2>/dev/null || true
+    smolvm machine delete "$name" -f
+}
+
+cmd_ls() {
+    if [[ "${1:-}" == "--all" ]]; then
+        smolvm machine ls
+    else
+        local matches; matches="$(clones_for_cwd)"
+        if [[ -z "$matches" ]]; then
+            echo "(no clones for $(basename "$PWD"))"
+        else
+            echo "$matches"
+        fi
+    fi
+}
+
+cmd_build() {
+    local blueprint="" all=false
+    local script_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)     all=true; shift ;;
+            --rebuild) script_args+=("$1"); shift ;;
+            -h|--help) usage; return 0 ;;
+            -*)        die "unknown flag: $1" ;;
+            *)         if [[ -z "$blueprint" ]]; then blueprint="$1"; else die "unexpected arg: $1"; fi; shift ;;
+        esac
+    done
+
+    if $all; then
+        [[ -n "$blueprint" ]] && die "pass a blueprint name OR --all, not both"
+        local script
+        for script in "$REPO_ROOT/blueprints/"*/build.sh; do
+            [[ -x "$script" ]] || continue
+            echo "=== building $(basename "$(dirname "$script")") ==="
+            "$script" ${script_args[@]+"${script_args[@]}"}
+        done
+        return
+    fi
+
+    blueprint="${blueprint:-bun-only}"
+    local script="$REPO_ROOT/blueprints/$blueprint/build.sh"
+    [[ -f "$script" ]] || die "no such blueprint: $blueprint (looked for $script)"
+    exec "$script" ${script_args[@]+"${script_args[@]}"}
+}
+
+cmd_new_blueprint() {
+    local name="" image=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --image) image="${2:-}"; shift 2 || die "--image needs a value" ;;
+            -h|--help) usage; return 0 ;;
+            -*) die "unknown flag: $1" ;;
+            *)  if [[ -z "$name" ]]; then name="$1"; else die "unexpected arg: $1"; fi; shift ;;
+        esac
+    done
+    [[ -n "$name"  ]] || die "new-blueprint needs a NAME"
+    [[ -n "$image" ]] || die "new-blueprint needs --image IMG"
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || die "name must match [a-zA-Z0-9_-]+ and start alphanumeric"
+
+    local target="$REPO_ROOT/blueprints/$name"
+    [[ -e "$target" ]] && die "$target already exists; refusing to overwrite"
+
+    mkdir -p "$target"
+    printf 'net = true\n' > "$target/pack.smolfile"
+
+    sed -e "s|__NAME__|$name|g" -e "s|__IMAGE__|$image|g" > "$target/build.sh" <<'TEMPLATE'
+#!/usr/bin/env bash
+#
+# Build the __NAME__ blueprint.
+#
+# Scaffolded by `dev-instance new-blueprint`. Starts from __IMAGE__,
+# installs minimal prereqs and three agent CLIs (Claude Code, Codex,
+# OpenCode) via the shared blueprints/_install-agents.sh.
+# Edit the install block below to add tools your projects need
+# (Node, Bun, Python deps, etc.) before running.
+#
+# Default: re-packs the existing source VM if it exists; otherwise
+# creates it from the base image. Pass --rebuild to delete the
+# existing source VM first and rebuild from scratch.
+
+set -euo pipefail
+
+REBUILD=false
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild) REBUILD=true ;;
+        -h|--help) echo "Usage: $0 [--rebuild]"; exit 0 ;;
+        *) echo "unknown arg: $arg" >&2; exit 1 ;;
+    esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DIST="$REPO_ROOT/dist"
+NAME="__NAME__"
+IMAGE="__IMAGE__"
+
+mkdir -p "$DIST"
+
+# Use --json: the plain `machine ls` table truncates the NAME column at ~16
+# chars + "..." and uses space-padded columns, which makes substring matching
+# unreliable for longer names.
+vm_exists() {
+    smolvm machine ls --json 2>/dev/null \
+        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | sed -E 's/.*"([^"]*)"$/\1/' \
+        | grep -Fxq "$NAME"
+}
+
+if $REBUILD && vm_exists; then
+    echo "==> --rebuild: deleting existing source VM '$NAME'..."
+    smolvm machine delete "$NAME" -f
+fi
+
+if vm_exists; then
+    echo "==> Re-packing existing source VM '$NAME' (no install step)."
+    echo "    Pass --rebuild to recreate from $IMAGE."
+    smolvm machine stop --name "$NAME" 2>/dev/null || true
+else
+    echo "==> Creating source VM '$NAME' from $IMAGE..."
+    smolvm machine create "$NAME" --image "$IMAGE" --net
+    smolvm machine start --name "$NAME"
+
+    smolvm machine exec --name "$NAME" -- bash -c '
+    set -euo pipefail
+
+    # Minimal prereqs — try common package managers in order.
+    if command -v apt-get >/dev/null; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends curl ca-certificates bash
+    elif command -v apk >/dev/null; then
+        apk add --no-cache curl ca-certificates bash
+    elif command -v dnf >/dev/null; then
+        dnf install -y curl ca-certificates bash
+    elif command -v yum >/dev/null; then
+        yum install -y curl ca-certificates bash
+    else
+        echo "ERROR: no supported package manager (apt-get/apk/dnf/yum). Install curl + ca-certificates manually above this block." >&2
+        exit 1
+    fi
+
+    # --- Add your custom installs here (Node, Bun, Python deps, etc.) ---
+
+    '
+
+    # Agent CLIs (Claude Code + Codex + OpenCode) via the shared installer.
+    echo "==> Installing agents..."
+    smolvm machine exec --name "$NAME" -- bash -s < "$REPO_ROOT/blueprints/_install-agents.sh"
+
+    smolvm machine stop --name "$NAME"
+fi
+
+echo "==> Packing into $DIST/$NAME.smolmachine..."
+smolvm pack create --from-vm "$NAME" \
+    -s "$SCRIPT_DIR/pack.smolfile" \
+    -o "$DIST/$NAME"
+
+echo
+echo "Built: $DIST/$NAME.smolmachine"
+TEMPLATE
+
+    chmod +x "$target/build.sh"
+
+    cat <<EOF
+Scaffolded: blueprints/$name/
+  build.sh       — edit the "Add your custom installs here" block, then run it
+  pack.smolfile  — pack config (net = true)
+
+Next:
+  \$EDITOR blueprints/$name/build.sh
+  dev-instance build $name
+  dev-instance create $name
+EOF
+}
+
+sub="${1:-help}"; shift || true
+case "$sub" in
+    create)         need_smolvm; cmd_create        "$@" ;;
+    shell)          need_smolvm; cmd_shell         "$@" ;;
+    stop)           need_smolvm; cmd_stop          "$@" ;;
+    rm)             need_smolvm; cmd_rm            "$@" ;;
+    ls)             need_smolvm; cmd_ls            "$@" ;;
+    build)          need_smolvm; cmd_build         "$@" ;;
+    new-blueprint)  cmd_new_blueprint              "$@" ;;
+    help|--help|-h) usage ;;
+    *)              die "unknown subcommand: $sub. Try: dev-instance help" ;;
+esac

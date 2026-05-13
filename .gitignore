@@ -1,9 +1,13 @@
-# Packed VM blobs — large (300-400 MB each), rebuilt from .smolfile + recipe.
+# Build output: packed VM blobs and pack-stub binaries.
+# Each blueprint's build.sh writes its .smolmachine + stub here.
+dist/
+
+# Belt-and-suspenders: catch any .smolmachine written outside dist/.
 *.smolmachine
 
-# Standalone pack-stub binaries — same content as the .smolmachine, just
-# wrapped in a runner. ~33 MB each. Re-emitted by `smolvm pack create`.
-# Anchored to the repo root so they don't clash with any future subdirs.
+# Legacy: pack-stub binaries from earlier builds that landed at the repo
+# root before dist/ existed. Safe to delete locally; ignored so they
+# don't sneak into commits.
 /ubuntu-dev
 /bun-dev
 /bun-only
