@@ -22,8 +22,8 @@ side of verbose.
 
 | Blueprint | Base | Real Node | Bun | Pack | Pick when |
 |---|---|---|---|---|---|
-| `ubuntu-dev` | Ubuntu 26.04 LTS | ✓ Node 24 | ✓ | 408 MB | You want the "give me everything" default. Node + Bun side-by-side, glibc, full apt ecosystem. |
-| `bun-dev` | Debian 13 (`oven/bun:slim`) | ✓ Node 24 | ✓ | 386 MB | Bun-first project, but keep Node as a safety net for npm CLIs that rely on Node-specific APIs. |
+| `ubuntu-bun-node` | Ubuntu 26.04 LTS | ✓ Node 24 | ✓ | 408 MB | You want the "give me everything" default. Node + Bun side-by-side, glibc, full apt ecosystem. |
+| `bun-node` | Debian 13 (`oven/bun:slim`) | ✓ Node 24 | ✓ | 386 MB | Bun-first project, but keep Node as a safety net for npm CLIs that rely on Node-specific APIs. |
 | `bun-only` | Debian 13 (`oven/bun:slim`) | — (`node→bun` shim) | ✓ | 307 MB | Strictly Bun, no real Node. Saves ~80 MB. `#!/usr/bin/env node` shebangs fall back to Bun's Node-compat mode — works for most things, may surprise on N-API native modules. |
 
 All three include: **agent CLIs** (Claude Code via `claude.ai/install.sh`,
@@ -46,8 +46,9 @@ one-off use cases that genuinely need it, drop to raw `smolvm machine create
 | `README.md` | Tour and quickstart aimed at someone who just cloned the repo. |
 | `CLAUDE.md` | This file — full reference. |
 | `dev-instance` | Bash CLI: `create`, `shell`, `stop`, `rm`, `ls`, `build`, `new-blueprint`. Per-project sandbox lifecycle on top of smolvm, plus blueprint build + scaffolding. |
-| `blueprints/<name>/build.sh` | One-shot build script per blueprint. Creates the source VM from a base image, installs distro-specific tooling, sources `_install-agents.sh` for the three agent CLIs, stops the VM, and packs it into `dist/<name>.smolmachine`. |
+| `blueprints/<name>/build.sh` | Per-blueprint build script. Sets `NAME` + `IMAGE`, sources `_build-lib.sh`, and calls `build_with_prereqs "$@" -- bash -c '<distro-specific install...>'`. The shared lib handles everything else (lifecycle, user + agents installers, packing). |
 | `blueprints/<name>/pack.smolfile` | TOML config consumed by `smolvm pack create -s`. Currently just `net = true` (bakes outbound networking into the packed artifact). Required — `pack create` has no `--net` flag. |
+| `blueprints/_build-lib.sh` | Shared build harness. Sourced by every blueprint's `build.sh` and by the `dev-instance new-blueprint` scaffold. Provides `vm_exists` and `build_with_prereqs FLAGS -- COMMAND...`, which handles `--rebuild` parsing, source-VM lifecycle (create/reuse/delete-and-recreate), the `cp + exec` of `_install-user.sh` + `_install-agents.sh`, and `pack create`. One file, edited once. |
 | `blueprints/_install-agents.sh` | Shared installer for Claude Code + Codex + OpenCode + `/etc/profile.d/agents-banner.sh`. Copied into the VM via `smolvm machine cp`, then run via `smolvm machine exec -- bash /tmp/_install-agents.sh` (`bash -s < file` doesn't work — smolvm exec doesn't forward host stdin). One file, edited once, picked up by every blueprint. |
 | `blueprints/_install-user.sh` | Drops `/usr/local/sbin/match-host-uid.sh` into the VM at build time. That script runs on every VM start (via smolvm `--init` set by `dev-instance create`) and creates a `dev` user matching `$HOST_UID`/`$HOST_GID`. Same `cp + exec` plumbing as `_install-agents.sh`. |
 | `CHANGELOG.md` | Keep-a-Changelog format. Update the `[Unreleased]` / next-version section as part of any user-visible change. |
@@ -95,10 +96,13 @@ dev-instance rm
 
 `shell`/`stop`/`rm` auto-target the cwd's clone when exactly one matches.
 Pass an explicit name if you've created several. `dev-instance ls` shows
-clones for the current dir; `dev-instance ls --all` shows everything.
+clones for the current dir; `dev-instance ls --all` shows everything. If
+you ended up with several clones for this project and want to scrub them
+all in one go, `dev-instance clean` lists them, prompts, then stops +
+deletes the lot (`-f` to skip the prompt).
 
-Pick a different blueprint with `dev-instance create bun-dev` /
-`ubuntu-dev`.
+Pick a different blueprint with `dev-instance create bun-node` /
+`ubuntu-bun-node`.
 
 ### Custom OCI image (escape hatch)
 
@@ -216,7 +220,7 @@ overlay (discarded on `dev-instance rm`).
 
 ## What's inside each blueprint
 
-| Tool | ubuntu-dev | bun-dev | bun-only |
+| Tool | ubuntu-bun-node | bun-node | bun-only |
 |---|---|---|---|
 | OS | Ubuntu 26.04 | Debian 13 (trixie) | Debian 13 (trixie) |
 | Node.js | 24.15 (NodeSource) | 24.15 (NodeSource) | — (`/usr/local/bun-node-fallback-bin/node → bun`) |
@@ -240,25 +244,33 @@ when you `dev-instance shell` into a clone.
 
 ## Building a blueprint
 
-Each blueprint has a self-contained build script at
-`blueprints/<name>/build.sh`. Behavior:
+Each `blueprints/<name>/build.sh` is a thin shim: it sets `NAME` +
+`IMAGE`, sources `blueprints/_build-lib.sh`, then calls
+`build_with_prereqs "$@" -- bash -c '<distro-specific install...>'`.
+The shared lib's `build_with_prereqs` handles:
 
-- **Source VM doesn't exist** → create it from the base image, install
-  distro prereqs (incl. `sudo`, needed for the `dev` user's sudoers
-  file), then `cp + exec` the two shared installers (`_install-user.sh`
-  + `_install-agents.sh`), then stop and pack.
+- **Source VM doesn't exist** → create it from the base image, run the
+  per-blueprint prereqs command (the `bash -c '...'` after `--`), then
+  `cp + exec` the two shared installers (`_install-user.sh` +
+  `_install-agents.sh`), then stop and pack.
 - **Source VM already exists** → just re-pack it as-is into
   `dist/<name>.smolmachine`. Fast (~seconds), no install step.
 - **`--rebuild` passed** → delete the existing source VM first, then
   fall through to the "doesn't exist" path. Full rebuild from base
   image (~5-10 min).
 
+So a blueprint's `build.sh` is now ~25 lines, almost all of which is
+the install commands that are actually unique to that blueprint
+(apt-get install, NodeSource setup, Bun PATH, …). Edits to the
+lifecycle, agents installer plumbing, or pack command go in
+`_build-lib.sh` and propagate to every blueprint.
+
 Run via the CLI:
 
 ```bash
 dev-instance build              # default: bun-only
-dev-instance build bun-dev
-dev-instance build ubuntu-dev
+dev-instance build bun-node
+dev-instance build ubuntu-bun-node
 dev-instance build --all        # iterates over all blueprints/*/build.sh
 dev-instance build bun-only --rebuild   # full clean rebuild
 ```
@@ -303,17 +315,20 @@ dev-instance new-blueprint my-python --image python:3.11-slim
 ```
 
 This writes `blueprints/my-python/build.sh` and `pack.smolfile`. The
-generated `build.sh`:
+generated `build.sh` follows the same shim pattern as the shipped
+blueprints — sets `NAME` + `IMAGE`, sources `_build-lib.sh`, calls
+`build_with_prereqs "$@" -- bash -c '...'`. The prereqs block:
 
 1. Auto-detects the package manager (apt / apk / dnf / yum) and
    installs the minimum prereqs (`curl`, `ca-certificates`, `bash`,
    `sudo`).
-2. Has a clearly-marked "Add your custom installs here" block where
-   you put project-specific tools (Node, Bun, Python libs, etc.).
-3. `cp + exec`s the same shared installers as the shipped blueprints:
-   `_install-user.sh` (the `dev` user + uid-matching runtime script)
-   then `_install-agents.sh` (Claude Code + Codex + OpenCode +
-   banner).
+2. Has a clearly-marked "Add your custom installs here" line where
+   you drop project-specific tools (Node, Bun, Python libs, etc.).
+
+The shared lib then handles everything after: `_install-user.sh`
+(the `dev` user + uid-matching runtime script), `_install-agents.sh`
+(Claude Code + Codex + OpenCode + banner), `smolvm machine stop`,
+and `pack create`.
 
 So a scaffolded blueprint behaves exactly like the shipped ones: same
 `dev` user, same three agent CLIs, same lifecycle via `dev-instance

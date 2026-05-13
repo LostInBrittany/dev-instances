@@ -5,6 +5,45 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project (loosely) follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-05-13
+
+### Changed
+
+- **Blueprint build scripts refactored to a shared harness.** Each
+  `blueprints/<name>/build.sh` is now a ~25-line shim that sets `NAME`
+  + `IMAGE`, sources `blueprints/_build-lib.sh`, and calls
+  `build_with_prereqs "$@" -- bash -c '<distro-specific install...>'`.
+  The shared lib handles `--rebuild` parsing, source-VM lifecycle
+  (create / reuse / delete-and-recreate), `cp + exec` of the two
+  shared installers, and `pack create`. Almost every line in a
+  per-blueprint `build.sh` is now actually unique to that blueprint
+  (the install commands themselves) — the previous ~70 lines of
+  identical lifecycle boilerplate per file are gone.
+- `dev-instance new-blueprint` scaffold template adopts the same
+  shim pattern, so scaffolded blueprints stay in sync with shipped
+  ones automatically when the lib changes.
+- **Blueprints renamed for clarity** — names now describe what's in
+  the blueprint rather than carrying a generic `-dev` suffix:
+  - `ubuntu-dev` → `ubuntu-bun-node` (Ubuntu base, ships Bun + Node)
+  - `bun-dev` → `bun-node` (Bun base image, adds Node)
+  - `bun-only` unchanged (already descriptive)
+
+  If you've already built the old names locally, the source VMs and
+  `dist/*.smolmachine` artifacts under the old names are orphaned —
+  `smolvm machine delete ubuntu-dev` / `bun-dev` and
+  `rm dist/{ubuntu-dev,bun-dev}.smolmachine` to reclaim disk, then
+  `dev-instance build` the new names.
+
+### Added
+
+- `blueprints/_build-lib.sh` — shared build harness. Exports
+  `vm_exists` and `build_with_prereqs FLAGS -- COMMAND...`. One file,
+  edited once.
+- **`dev-instance clean`** — stop and delete every clone for the
+  current directory in one go. Lists the matches and prompts by
+  default; pass `-f` / `--force` to skip the prompt. Continues past
+  per-clone failures and exits nonzero if any failed.
+
 ## [0.1.1] — 2026-05-13
 
 ### Added

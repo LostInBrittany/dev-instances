@@ -12,8 +12,8 @@ What's in the box:
 
 - **`dev-instance`** — the per-project lifecycle CLI: `create`, `shell`,
   `stop`, `rm`, `ls`, `build`, `new-blueprint`.
-- **Three example blueprints** as starting points — `ubuntu-dev`,
-  `bun-dev`, `bun-only`. Build the one(s) you'll use; the others can
+- **Three example blueprints** as starting points — `ubuntu-bun-node`,
+  `bun-node`, `bun-only`. Build the one(s) you'll use; the others can
   wait. (Or ignore them entirely and scaffold your own.)
 - **Shared installers** in `blueprints/_install-{user,agents}.sh` that
   every blueprint — shipped *or* scaffolded — sources. They set up the
@@ -91,8 +91,8 @@ different base, [scaffold one](#making-your-own-blueprint).
 
 | Blueprint | Base | Real Node | Bun | Pack | Pick when |
 |---|---|---|---|---|---|
-| `ubuntu-dev` | Ubuntu 26.04 LTS | yes (Node 24) | yes | 408 MB | "Give me everything" default. Node + Bun, glibc, full apt. |
-| `bun-dev` | Debian 13 (`oven/bun:slim`) | yes (Node 24) | yes | 386 MB | Bun-first projects, but keep Node as a safety net for npm CLIs that hit Node-specific APIs. |
+| `ubuntu-bun-node` | Ubuntu 26.04 LTS | yes (Node 24) | yes | 408 MB | "Give me everything" default. Node + Bun, glibc, full apt. |
+| `bun-node` | Debian 13 (`oven/bun:slim`) | yes (Node 24) | yes | 386 MB | Bun-first projects, but keep Node as a safety net for npm CLIs that hit Node-specific APIs. |
 | `bun-only` | Debian 13 (`oven/bun:slim`) | shim (`node` → `bun`) | yes | 307 MB | Strictly Bun. Saves ~80 MB. `#!/usr/bin/env node` shebangs fall back to Bun's Node-compat mode. |
 
 All three include the three agent CLIs (Claude Code, Codex CLI,
@@ -107,11 +107,12 @@ want by typing the command.
 dev-instances/
 ├── dev-instance                      # per-project sandbox CLI (bash)
 ├── blueprints/
+│   ├── _build-lib.sh                 # shared: build harness sourced by every build.sh
 │   ├── _install-user.sh              # shared: dev user + uid-matching
 │   ├── _install-agents.sh            # shared: Claude + Codex + OpenCode
-│   ├── ubuntu-dev/   { build.sh, pack.smolfile }
-│   ├── bun-dev/      { build.sh, pack.smolfile }
-│   └── bun-only/     { build.sh, pack.smolfile }
+│   ├── ubuntu-bun-node/ { build.sh, pack.smolfile }
+│   ├── bun-node/        { build.sh, pack.smolfile }
+│   └── bun-only/        { build.sh, pack.smolfile }
 ├── dist/                             # build output (git-ignored)
 ├── wip/                              # upstream fedora-issue drafts (smolvm#263)
 ├── README.md
@@ -131,8 +132,8 @@ Build the blueprint(s) you want via the CLI:
 
 ```bash
 ./dev-instance build              # default: bun-only
-./dev-instance build bun-dev
-./dev-instance build ubuntu-dev
+./dev-instance build bun-node
+./dev-instance build ubuntu-bun-node
 ./dev-instance build --all        # all three, ~15-30 min total
 ```
 
@@ -230,7 +231,7 @@ cd ~/code/proj-foo
 # 2. Create + start a sandbox. $PWD is mounted as ~/workspace.
 #    Auto-named "proj-foo-<4 hex>". Default blueprint: bun-only.
 dev-instance create
-# (or: dev-instance create bun-dev / ubuntu-dev)
+# (or: dev-instance create bun-node / ubuntu-bun-node)
 
 # 3. Drop in — bun, all three agent CLIs (claude/codex/opencode), git ready.
 #    cwd is ~/workspace.
@@ -247,7 +248,9 @@ dev-instance rm
 
 `shell`, `stop`, `rm` auto-target the cwd's clone when exactly one matches —
 no name needed. Pass `--all` to `dev-instance ls` to see every clone, not
-just the ones from this dir.
+just the ones from this dir. If you've accumulated several clones for the
+same project, `dev-instance clean` stops and deletes the whole set after a
+confirmation (or `dev-instance clean -f` to skip the prompt).
 
 ### Host-matching user inside the VM
 

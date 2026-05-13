@@ -2,94 +2,32 @@
 #
 # Build the bun-only blueprint.
 #
-# Default: if the source VM `bun-only` exists, just re-pack it into
-# dist/bun-only.smolmachine (fast). If it doesn't, create it from
-# oven/bun:slim and install build tools + Claude Code via the native
-# installer (~5-10 min) before packing. No real Node — relies on
-# Bun's Node-compat mode via the bun-node-fallback shim.
+# Base: oven/bun:slim. No real Node — relies on Bun's Node-compat mode
+# via the bun-node-fallback shim. Smallest pack of the three.
 #
-# Pass --rebuild to delete the existing source VM first and rebuild
-# from the base image.
+# Default: re-packs the existing source VM if one exists (fast);
+# otherwise creates it from the base image (~5-10 min). Pass --rebuild
+# to delete the existing source VM and start fresh.
 
 set -euo pipefail
 
-REBUILD=false
-for arg in "$@"; do
-    case "$arg" in
-        --rebuild) REBUILD=true ;;
-        -h|--help) echo "Usage: $0 [--rebuild]"; exit 0 ;;
-        *) echo "unknown arg: $arg" >&2; exit 1 ;;
-    esac
-done
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DIST="$REPO_ROOT/dist"
 NAME="bun-only"
 IMAGE="oven/bun:slim"
 
-mkdir -p "$DIST"
+# shellcheck source=../_build-lib.sh
+source "$(cd "$(dirname "$0")" && pwd)/../_build-lib.sh"
 
-# Use --json: the plain `machine ls` table truncates the NAME column at ~16
-# chars + "..." and uses space-padded columns, which makes substring matching
-# unreliable for longer names.
-vm_exists() {
-    smolvm machine ls --json 2>/dev/null \
-        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
-        | sed -E 's/.*"([^"]*)"$/\1/' \
-        | grep -Fxq "$NAME"
-}
+build_with_prereqs "$@" -- bash -c '
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
-if $REBUILD && vm_exists; then
-    echo "==> --rebuild: deleting existing source VM '$NAME'..."
-    smolvm machine delete "$NAME" -f
-fi
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
+  git curl unzip ca-certificates gnupg build-essential sudo
 
-if vm_exists; then
-    echo "==> Re-packing existing source VM '$NAME' (no install step)."
-    echo "    Pass --rebuild to recreate from $IMAGE."
-    smolvm machine stop --name "$NAME" 2>/dev/null || true
-else
-    echo "==> Creating source VM '$NAME' from $IMAGE..."
-    smolvm machine create "$NAME" --image "$IMAGE" --net
-    smolvm machine start --name "$NAME"
-
-    # Distro prereqs + bun PATH.
-    smolvm machine exec --name "$NAME" -- bash -c '
-    set -euo pipefail
-    export DEBIAN_FRONTEND=noninteractive
-
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends \
-      git curl unzip ca-certificates gnupg build-essential sudo
-
-    # PATH: bun bin first, then the node→bun fallback so `#!/usr/bin/env node` works.
-    cat > /etc/profile.d/bun.sh <<EOF
+# PATH: bun bin first, then the node→bun fallback so `#!/usr/bin/env node` works.
+cat > /etc/profile.d/bun.sh <<EOF
 export PATH=/root/.bun/bin:/usr/local/bun-node-fallback-bin:\$PATH
 EOF
-    chmod +x /etc/profile.d/bun.sh
-    '
-
-    # Runtime user-matching script (drops /usr/local/sbin/match-host-uid.sh
-    # in the VM; invoked by `dev-instance create` via smolvm --init).
-    # Use `cp + exec` instead of `bash -s < file` because smolvm exec
-    # doesn't forward stdin without -i (and -i is interactive-flavored).
-    echo "==> Installing user-matching runtime script..."
-    smolvm machine cp "$REPO_ROOT/blueprints/_install-user.sh" "$NAME:/tmp/_install-user.sh"
-    smolvm machine exec --name "$NAME" -- bash /tmp/_install-user.sh
-
-    # Agent CLIs (Claude Code + Codex + OpenCode) via the shared installer.
-    echo "==> Installing agents..."
-    smolvm machine cp "$REPO_ROOT/blueprints/_install-agents.sh" "$NAME:/tmp/_install-agents.sh"
-    smolvm machine exec --name "$NAME" -- bash /tmp/_install-agents.sh
-
-    smolvm machine stop --name "$NAME"
-fi
-
-echo "==> Packing into $DIST/$NAME.smolmachine..."
-smolvm pack create --from-vm "$NAME" \
-    -s "$SCRIPT_DIR/pack.smolfile" \
-    -o "$DIST/$NAME"
-
-echo
-echo "Built: $DIST/$NAME.smolmachine"
+chmod +x /etc/profile.d/bun.sh
+'
