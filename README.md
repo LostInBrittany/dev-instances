@@ -222,6 +222,24 @@ dev-instance rm
 no name needed. Pass `--all` to `dev-instance ls` to see every clone, not
 just the ones from this dir.
 
+### Host-matching user inside the VM
+
+You're not root inside a blueprint clone — `dev-instance` creates a `dev`
+user whose uid/gid match your host user's (passed via `HOST_UID`/`HOST_GID`
+env vars and applied by `/usr/local/sbin/match-host-uid.sh` at every VM
+start). The point is **bidirectional file ownership**: files you create
+on the host show up as `dev`-owned in the VM, and files agents create in
+`~/workspace` from inside the VM show up with *your* uid/gid on the host
+— no post-session `chown` dance.
+
+`dev` has passwordless sudo, so an agent that decides it needs
+`sudo apt install foo` to finish a task can do that without prompting.
+
+The `--image` escape hatch below doesn't have this setup — those clones
+run as root in `/root/workspace` (the original behavior). The fix is
+blueprint-only because the runtime user-matching script ships in the
+blueprint, not in arbitrary OCI images.
+
 ### Custom OCI image (escape hatch)
 
 If a prebuilt blueprint doesn't fit, point `dev-instance` at any OCI image
@@ -259,7 +277,9 @@ Two clean ways to wire them up:
 # Option 1: forward from the host shell at create time
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY OPENAI_API_KEY=$OPENAI_API_KEY \
   smolvm machine create my-proj-abcd --from ~/dev-instances/dist/bun-only.smolmachine \
-    --net -v "$PWD:/root/workspace" -w /root/workspace \
+    --net -v "$PWD:/home/dev/workspace" -w /home/dev/workspace \
+    -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+    --init /usr/local/sbin/match-host-uid.sh \
     -e ANTHROPIC_API_KEY -e OPENAI_API_KEY
 # (dev-instance create doesn't currently forward env; use raw smolvm if you
 #  want this until that surface lands.)

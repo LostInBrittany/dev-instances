@@ -4,8 +4,11 @@
 #
 # Creates, manages, and destroys per-project VM clones from prebuilt
 # blueprints (or any OCI image). Mounts $PWD into the clone as
-# ~/workspace (= /root/workspace). No credentials enter the clone by
-# default.
+# ~/workspace. Blueprint clones run as a `dev` user whose uid/gid match
+# the host user's, so files written inside the mount keep host
+# ownership without a post-session chown. --image clones default to
+# root (the original setup) since the matching scripts only exist in
+# our blueprints. No credentials enter the clone by default.
 #
 # Repo location is auto-detected from this script's path (so symlinks
 # into ~/.local/bin/ work). Override with $DEV_INSTANCES_ROOT.
@@ -134,14 +137,19 @@ cmd_create() {
     local name; name="$(generate_name)"
 
     if [[ -n "$image" ]]; then
+        # Raw image mode: no dev user, mount at /root/workspace, runs as root.
         smolvm machine create "$name" --image "$image" --net \
             -v "$PWD:/root/workspace" -w /root/workspace
     else
         blueprint="${blueprint:-bun-only}"
         local pack="$DIST/${blueprint}.smolmachine"
         [[ -f "$pack" ]] || die "blueprint '$blueprint' not built. Run: dev-instance build $blueprint"
+        # Blueprint mode: pass host uid/gid + the runtime user-matching
+        # script via --init, mount at /home/dev/workspace.
         smolvm machine create "$name" --from "$pack" --net \
-            -v "$PWD:/root/workspace" -w /root/workspace
+            -v "$PWD:/home/dev/workspace" -w /home/dev/workspace \
+            -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+            --init /usr/local/sbin/match-host-uid.sh
     fi
 
     smolvm machine start --name "$name"
@@ -150,7 +158,15 @@ cmd_create() {
 
 cmd_shell() {
     local name; name="$(resolve_name "${1:-}")"
-    exec smolvm machine exec --name "$name" -w /root/workspace -it -- bash -l
+    # If the clone has a `dev` user (blueprint mode), drop in as them in
+    # /home/dev/workspace. Otherwise (raw --image mode) fall back to root
+    # in /root/workspace.
+    if smolvm machine exec --name "$name" -- id dev >/dev/null 2>&1; then
+        exec smolvm machine exec --name "$name" -w /home/dev/workspace -it -- \
+            runuser -u dev -- bash -l
+    else
+        exec smolvm machine exec --name "$name" -w /root/workspace -it -- bash -l
+    fi
 }
 
 cmd_stop() {
@@ -292,15 +308,15 @@ else
     if command -v apt-get >/dev/null; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq --no-install-recommends curl ca-certificates bash
+        apt-get install -y -qq --no-install-recommends curl ca-certificates bash sudo
     elif command -v apk >/dev/null; then
-        apk add --no-cache curl ca-certificates bash
+        apk add --no-cache curl ca-certificates bash sudo
     elif command -v dnf >/dev/null; then
-        dnf install -y curl ca-certificates bash
+        dnf install -y curl ca-certificates bash sudo
     elif command -v yum >/dev/null; then
-        yum install -y curl ca-certificates bash
+        yum install -y curl ca-certificates bash sudo
     else
-        echo "ERROR: no supported package manager (apt-get/apk/dnf/yum). Install curl + ca-certificates manually above this block." >&2
+        echo "ERROR: no supported package manager (apt-get/apk/dnf/yum). Install curl + ca-certificates + sudo manually above this block." >&2
         exit 1
     fi
 
@@ -308,9 +324,18 @@ else
 
     '
 
+    # Runtime user-matching script (drops /usr/local/sbin/match-host-uid.sh
+    # in the VM; invoked by `dev-instance create` via smolvm --init).
+    # Use `cp + exec` instead of `bash -s < file` because smolvm exec
+    # doesn't forward stdin without -i (and -i is interactive-flavored).
+    echo "==> Installing user-matching runtime script..."
+    smolvm machine cp "$REPO_ROOT/blueprints/_install-user.sh" "$NAME:/tmp/_install-user.sh"
+    smolvm machine exec --name "$NAME" -- bash /tmp/_install-user.sh
+
     # Agent CLIs (Claude Code + Codex + OpenCode) via the shared installer.
     echo "==> Installing agents..."
-    smolvm machine exec --name "$NAME" -- bash -s < "$REPO_ROOT/blueprints/_install-agents.sh"
+    smolvm machine cp "$REPO_ROOT/blueprints/_install-agents.sh" "$NAME:/tmp/_install-agents.sh"
+    smolvm machine exec --name "$NAME" -- bash /tmp/_install-agents.sh
 
     smolvm machine stop --name "$NAME"
 fi
