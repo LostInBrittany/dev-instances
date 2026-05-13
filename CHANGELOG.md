@@ -5,6 +5,66 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project (loosely) follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-05-13
+
+### Added
+
+- **`dev-instance create --copy-claude`** — copies a Claude Code
+  config allowlist from the host's `~/.claude/` into the new clone
+  (`settings.json`, `CLAUDE.md`, `skills/`, `agents/`, `commands/`,
+  `hooks/`, `plugins/`, `statusline.{sh,js}`, `claude-quota.js`) and
+  chowns it to the `dev` user. Host-keyed runtime state
+  (`sessions/`, `projects/`, `todos/`, `statsig/`,
+  `shell-snapshots/`, history, caches, telemetry, etc.) is
+  explicitly skipped — see [BACKLOG.md](BACKLOG.md) for the
+  filtering rationale. Blueprint-mode only (the `--image` escape
+  hatch runs as root with no `~dev`, so it's not supported).
+  Codex / OpenCode equivalents are still in the backlog.
+
+  Implementation notes worth knowing:
+  - Tar uses `--dereference` so host-side symlinks in `~/.claude/`
+    (e.g. `skills/clever-tools` pointing into a project dir) land
+    inside the VM as real directories rather than dangling symlinks.
+  - `--init` is async (`smolvm machine start` returns before it
+    finishes), so `cmd_create` polls `id dev` before doing any exec
+    work to avoid racing the dev-user setup.
+  - `smolvm machine cp` reverts the writable filesystem on
+    `--from <pack>` machines, so the `dev` user created by `--init`
+    disappears after the copy. `cmd_create` re-runs
+    `match-host-uid.sh` after the copy as a workaround. Tracked
+    upstream as
+    [smol-machines/smolvm#264](https://github.com/smol-machines/smolvm/issues/264)
+    (filed during this release).
+- **`BACKLOG.md`** — new tracking file at the repo root listing
+  pending features and design decisions, including planned Codex /
+  OpenCode equivalents of `--copy-claude` and the
+  bash-or-something-else question for the `dev-instance` CLI.
+
+### Documentation
+
+- New "terminal size stuck at 80×24" entry in the *Known limitations*
+  section of `CLAUDE.md`, with a pointer to upstream
+  [smol-machines/smolvm#156](https://github.com/smol-machines/smolvm/issues/156)
+  (we contributed evidence as a comment during this release; SIGWINCH
+  forwarding doesn't take effect in smolvm 0.6.3 on macOS 26.4.1,
+  regardless of `--image` vs `--from`).
+
+### Upstream filings
+
+Not strictly user-visible but worth recording — these came out of
+landing `--copy-claude`:
+
+- Filed [smol-machines/smolvm#264](https://github.com/smol-machines/smolvm/issues/264):
+  `machine cp` reverts writable filesystem changes on `--from <pack>`
+  machines. Draft + reproducer kept in `wip/issue-cp-reverts-pack-fs.md`.
+- Posted comment on
+  [smol-machines/smolvm#156](https://github.com/smol-machines/smolvm/issues/156)
+  confirming SIGWINCH forwarding is still broken in 0.6.3 despite
+  the claimed fix in 0.5.18 / commit `ce832d0`. Draft kept in
+  `wip/comment-smolvm-156.md`.
+- Five additional smolvm papercuts drafted at
+  `wip/issue-papercuts.md` for future filing.
+
 ## [0.1.2] — 2026-05-13
 
 ### Changed

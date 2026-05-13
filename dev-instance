@@ -24,6 +24,9 @@ Usage:
                                        (default: bun-only).
   dev-instance create --image IMG      Create + start a clone from any OCI image
                                        (no Claude Code preinstalled).
+  dev-instance create --copy-claude    Also copy host's ~/.claude config (settings,
+                                       skills, agents, hooks, plugins, statusline)
+                                       into the clone. Blueprint-mode only.
   dev-instance shell [NAME]            Exec into a clone (auto-detected from
                                        cwd if exactly one matches).
   dev-instance stop  [NAME]            Stop a running clone.
@@ -125,16 +128,18 @@ resolve_name() {
 }
 
 cmd_create() {
-    local blueprint="" image=""
+    local blueprint="" image="" copy_claude=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --image) image="${2:-}"; shift 2 || die "--image needs a value" ;;
-            -h|--help) usage; return 0 ;;
-            -*) die "unknown flag: $1" ;;
-            *)  blueprint="$1"; shift ;;
+            --image)       image="${2:-}"; shift 2 || die "--image needs a value" ;;
+            --copy-claude) copy_claude=true; shift ;;
+            -h|--help)     usage; return 0 ;;
+            -*)            die "unknown flag: $1" ;;
+            *)             blueprint="$1"; shift ;;
         esac
     done
     [[ -n "$blueprint" && -n "$image" ]] && die "pass a blueprint OR --image, not both"
+    $copy_claude && [[ -n "$image" ]] && die "--copy-claude is blueprint-only (--image clones run as root, no dev user)"
 
     local name; name="$(generate_name)"
 
@@ -155,7 +160,115 @@ cmd_create() {
     fi
 
     smolvm machine start --name "$name"
+
+    if $copy_claude; then
+        # `smolvm machine start --init ...` returns before init has
+        # finished. If we exec into the VM too soon we race the dev-user
+        # setup in match-host-uid.sh — the symptom is a clone that comes
+        # up as root instead of dev. Poll for the dev user first.
+        wait_for_dev_user "$name"
+        copy_claude_settings "$name"
+        # `smolvm machine cp` reverts the writable filesystem on
+        # --from <pack> machines, so the dev user created by --init
+        # disappears. Re-run match-host-uid.sh to recreate it (and
+        # re-chown /home/dev so our copied files end up owned by the
+        # host uid:gid). Pass HOST_UID/HOST_GID explicitly via env so
+        # this works even if the machine-level env vars set at create
+        # time don't propagate into exec.
+        # Tracking upstream: smol-machines/smolvm#264.
+        smolvm machine exec --name "$name" -- env \
+            "HOST_UID=$(id -u)" "HOST_GID=$(id -g)" \
+            /usr/local/sbin/match-host-uid.sh
+    fi
+
     echo "$name"
+}
+
+# Poll until the dev user (created by --init / match-host-uid.sh) exists.
+# `smolvm machine start --init ...` returns before init has actually
+# finished, so blowing past it into `machine exec` can race the user
+# setup. Symptom: clone comes up as root instead of dev.
+wait_for_dev_user() {
+    local vm_name="$1" tries=0
+    while ! smolvm machine exec --name "$vm_name" -- id dev >/dev/null 2>&1; do
+        ((tries++))
+        if (( tries > 60 )); then
+            die "timed out waiting for dev user (init may have failed)"
+        fi
+        sleep 0.5
+    done
+}
+
+# Copy a Claude Code config allowlist from ~/.claude/ on the host into
+# /home/dev/.claude/ inside the clone, then chown to the host uid:gid
+# so the `dev` user owns it. Allowlist is config + personalization +
+# user-level memory only; runtime/history (sessions/, projects/,
+# todos/, statsig/, shell-snapshots/, history.jsonl, caches, telemetry
+# etc.) is explicitly skipped — see BACKLOG.md.
+copy_claude_settings() {
+    local vm_name="$1"
+
+    if [[ ! -d "$HOME/.claude" ]]; then
+        echo "dev-instance: no ~/.claude on host; skipping --copy-claude" >&2
+        return 0
+    fi
+
+    local items=(
+        settings.json
+        CLAUDE.md
+        skills
+        agents
+        commands
+        hooks
+        plugins
+        statusline.sh
+        statusline.js
+        claude-quota.js
+    )
+
+    local present=() item
+    for item in "${items[@]}"; do
+        [[ -e "$HOME/.claude/$item" ]] && present+=("$item")
+    done
+
+    if [[ ${#present[@]} -eq 0 ]]; then
+        echo "dev-instance: no Claude config items present in ~/.claude; nothing to copy" >&2
+        return 0
+    fi
+
+    echo "==> Copying Claude Code config (${#present[@]} items) into $vm_name..."
+
+    local tmptar
+    tmptar="$(mktemp -t devinst-claude.XXXXXX.tar)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmptar'" RETURN
+
+    # Strip macOS extended attributes and AppleDouble metadata so the
+    # VM's GNU tar doesn't warn about LIBARCHIVE.xattr.* pax headers
+    # and doesn't unpack ._* AppleDouble companions. Both flags are
+    # feature-detected so this is safe on Linux hosts too.
+    #
+    # --dereference follows symlinks and archives their target content
+    # as real files. Without it, a symlink like
+    # ~/.claude/skills/clever-tools → /Users/horacio/projects/... would
+    # land in the VM as a symlink to a host path that doesn't exist
+    # there, breaking both the skill and the subsequent chown.
+    local tar_flags=(--dereference)
+    if tar --no-xattrs --version >/dev/null 2>&1; then
+        tar_flags+=(--no-xattrs)
+    fi
+    if tar --no-mac-metadata --version >/dev/null 2>&1; then
+        tar_flags+=(--no-mac-metadata)
+    fi
+    tar c "${tar_flags[@]}" -C "$HOME/.claude" -f "$tmptar" "${present[@]}"
+    smolvm machine cp "$tmptar" "$vm_name:/tmp/claude-cfg.tar"
+    smolvm machine exec --name "$vm_name" -- bash -c "
+        set -e
+        mkdir -p /home/dev/.claude
+        tar x -C /home/dev/.claude -f /tmp/claude-cfg.tar
+        rm /tmp/claude-cfg.tar
+        chown -R $(id -u):$(id -g) /home/dev/.claude
+    "
 }
 
 cmd_shell() {
@@ -163,6 +276,13 @@ cmd_shell() {
     # If the clone has a `dev` user (blueprint mode), drop in as them in
     # /home/dev/workspace. Otherwise (raw --image mode) fall back to root
     # in /root/workspace.
+    #
+    # Note: terminal size inside the clone is currently stuck at 80x24
+    # regardless of host width. smolvm 0.6.3's SIGWINCH forwarding isn't
+    # taking effect for us — tracked alongside smolvm#156. Nothing we
+    # can do from inside the VM helps (in-VM stty is overridden by
+    # smolvm, bash resets COLUMNS from TIOCGWINSZ at startup). Waiting
+    # on upstream.
     if smolvm machine exec --name "$name" -- id dev >/dev/null 2>&1; then
         exec smolvm machine exec --name "$name" -w /home/dev/workspace -it -- \
             runuser -u dev -- bash -l

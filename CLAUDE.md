@@ -379,6 +379,16 @@ overwrite an existing `blueprints/<name>/`.
   the VM proper. Implication: VS Code Remote-SSH / JetBrains Gateway
   into clones is not possible today. Interact via `dev-instance shell`
   (which wraps `smolvm machine exec -it`).
+- **Terminal size inside clones is stuck at 80×24.** smolvm 0.6.3's
+  SIGWINCH forwarding doesn't take effect for us (verified on macOS
+  26.4.1 against both `--image` and `--from <pack>` clones), and no
+  in-VM workaround works: `stty cols/rows` is silently overridden,
+  and bash resets `COLUMNS`/`LINES` from `TIOCGWINSZ` at startup.
+  TUIs (Claude Code, vim, less, …) draw at 80 columns regardless of
+  host terminal width. Tracked upstream as
+  [smol-machines/smolvm#156](https://github.com/smol-machines/smolvm/issues/156)
+  (we added evidence in a follow-up comment). No good workaround
+  until the smolvm fix lands.
 - **Agent installers drop binaries under `$HOME`.** Both the Claude
   Code installer (`claude.ai/install.sh`) and the OpenCode installer
   (`opencode.ai/install`) decide their target dir at install time and
