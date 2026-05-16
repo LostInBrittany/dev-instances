@@ -5,6 +5,68 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project (loosely) follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] — 2026-05-16
+
+Cleanup release: smolvm
+[#264](https://github.com/smol-machines/smolvm/issues/264) is fixed
+in smolvm 0.7.0, so the workaround in `cmd_create` is gone.
+[#263](https://github.com/smol-machines/smolvm/issues/263) is
+**partially** fixed in 0.7.0 — simple Fedora packs now extract, but
+packs whose overlay contains package upgrades (any non-trivial
+`dnf install` triggers these) still fail. So no Fedora blueprint is
+shipped yet; the residual case is documented for upstream in
+`wip/comment-smolvm-263-still-broken.md`.
+
+### Changed
+
+- **Minimum required smolvm bumped to 0.7.0.** Older versions will
+  produce a clone that comes up as root rather than `dev` when
+  `--copy-claude` is used, because they still have the `machine cp`
+  state-revert bug.
+- **Removed the post-copy `match-host-uid.sh` workaround in
+  `cmd_create`.** It was only there to recover the `dev` user that
+  smolvm#264 wiped on every `machine cp`. With the upstream fix the
+  workaround is dead code; deleted.
+- **Fedora support partially unblocked but still not ready.**
+  Surface-level form of #263 is gone in 0.7.0 — simple Fedora
+  packs extract — but any pack with `dnf install`-induced package
+  upgrades still fails. CLAUDE.md's *Distros and trade-offs*
+  entry now reflects this nuance rather than the old "Fedora is
+  currently blocked" / new "Fedora is usable" extremes.
+
+### Verified
+
+- smolvm#264 reproducer (`wip/issue-cp-reverts-pack-fs.md`): on
+  0.7.0, alice persists after `cp` on both `--from <pack>` and
+  `--image` machines — fix confirmed.
+- smolvm#263 (Fedora pack with `dnf install`): pack create + extract
+  + clone succeeds on 0.7.0 only when the dnf transaction is a true
+  no-op (no upgrades). Real `dnf install` workloads (which dnf
+  resolves by upgrading base libs) **still fail to extract**.
+  We tried to ship a `fedora-bun-node` blueprint, hit the residual
+  bug, rolled it back. Filed upstream as
+  [smolvm#278](https://github.com/smol-machines/smolvm/issues/278)
+  (continuation of closed #263).
+
+### Filed during this release
+
+- [smolvm#277](https://github.com/smol-machines/smolvm/issues/277):
+  `pack create` panics on short VM names (`assets.rs:235:55: end
+  byte index 12 is out of bounds of 'overlay-x'`). Found while
+  reproducing the Fedora extract failure with a one-letter VM
+  name; unrelated to Fedora.
+- [smolvm#278](https://github.com/smol-machines/smolvm/issues/278):
+  continuation of #263 — Fedora packs with real `dnf install`
+  content still fail to extract on macOS. Original #263 was closed
+  as fixed in 0.7.0, but the residual case persists for the
+  packed-machine workflow that actually exercises dnf.
+
+### Still open upstream
+
+- [smolvm#156](https://github.com/smol-machines/smolvm/issues/156)
+  (terminal size stuck at 80×24) — still not fixed in 0.7.0. The
+  "Known limitations" note in CLAUDE.md still applies.
+
 ## [0.1.3] — 2026-05-13
 
 ### Added

@@ -168,17 +168,6 @@ cmd_create() {
         # up as root instead of dev. Poll for the dev user first.
         wait_for_dev_user "$name"
         copy_claude_settings "$name"
-        # `smolvm machine cp` reverts the writable filesystem on
-        # --from <pack> machines, so the dev user created by --init
-        # disappears. Re-run match-host-uid.sh to recreate it (and
-        # re-chown /home/dev so our copied files end up owned by the
-        # host uid:gid). Pass HOST_UID/HOST_GID explicitly via env so
-        # this works even if the machine-level env vars set at create
-        # time don't propagate into exec.
-        # Tracking upstream: smol-machines/smolvm#264.
-        smolvm machine exec --name "$name" -- env \
-            "HOST_UID=$(id -u)" "HOST_GID=$(id -g)" \
-            /usr/local/sbin/match-host-uid.sh
     fi
 
     echo "$name"

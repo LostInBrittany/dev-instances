@@ -16,20 +16,16 @@ once both follow-ups land.
 
 Two smolvm-side gotchas discovered while landing this:
 
-1. **`smolvm machine cp` on `--from <pack>` machines reverts the
-   writable filesystem** to its post-pack-restore state, keeping only
-   the just-cp'd file. Wipes users created by exec or `--init`, custom
-   files anywhere writable, and any files from previous `cp` calls.
-   Does *not* happen on `--image <stock>` machines — the trigger is
-   `--from`. File size, `--init` presence, and mounts are all
-   irrelevant. Worked around in `cmd_create` by re-running
-   `match-host-uid.sh` after the copy (only restores the dev user;
-   other state would still be lost). Filed upstream as
-   [smol-machines/smolvm#264](https://github.com/smol-machines/smolvm/issues/264).
+1. ~~**`smolvm machine cp` on `--from <pack>` machines reverts the
+   writable filesystem.**~~ **Fixed in smolvm 0.7.0** (filed as
+   [smolvm#264](https://github.com/smol-machines/smolvm/issues/264);
+   the corresponding `cmd_create` workaround was removed in 0.1.3).
 2. **`smolvm machine start --init …` returns before init has
    finished.** Eager `machine exec` after start races init and the
-   `dev` user may not exist yet. Worked around with `wait_for_dev_user`
-   (poll `id dev` until it returns 0).
+   `dev` user may not exist yet. Still present in 0.7.0; worked
+   around with `wait_for_dev_user` (poll `id dev` until it returns
+   0). See [`wip/issue-papercuts.md`](wip/issue-papercuts.md)
+   entry 1 for the upstream filing draft.
 
 Also worth noting: tar must use `--dereference` so host-side symlinks
 in `~/.claude/` (e.g. a `skills/clever-tools` pointing into a project

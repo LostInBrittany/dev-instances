@@ -41,7 +41,7 @@ then use it per-project.**
 
 - **macOS or Linux host.** smolvm uses hardware virtualization —
   Hypervisor.framework on macOS, KVM (`/dev/kvm`) on Linux.
-- **[smolvm](https://github.com/smol-machines/smolvm)** on your PATH:
+- **[smolvm](https://github.com/smol-machines/smolvm) 0.7.0 or newer** on your PATH:
   ```bash
   # macOS & Linux:
   curl -sSL https://smolmachines.com/install.sh | bash
@@ -51,7 +51,12 @@ then use it per-project.**
   ```
   `dev-instance` checks for it before running anything that needs it; if
   it's missing you'll get a clear install hint instead of a cryptic
-  pipeline failure.
+  pipeline failure. 0.7.0 is required because `dev-instance create
+  --copy-claude` relies on bugfixes that landed in that release
+  ([smolvm#263](https://github.com/smol-machines/smolvm/issues/263)
+  + [smolvm#264](https://github.com/smol-machines/smolvm/issues/264));
+  earlier versions will produce clones that come up as root rather
+  than `dev` when `--copy-claude` is used.
 
 ## Why a VM and not devcontainers?
 
@@ -114,7 +119,7 @@ dev-instances/
 │   ├── bun-node/        { build.sh, pack.smolfile }
 │   └── bun-only/        { build.sh, pack.smolfile }
 ├── dist/                             # build output (git-ignored)
-├── wip/                              # upstream fedora-issue drafts (smolvm#263)
+├── wip/                              # upstream bug-report drafts (filed against smolvm)
 ├── README.md
 ├── CLAUDE.md                         # full reference + Claude Code project memory
 ├── CHANGELOG.md

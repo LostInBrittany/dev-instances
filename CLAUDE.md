@@ -52,7 +52,7 @@ one-off use cases that genuinely need it, drop to raw `smolvm machine create
 | `blueprints/_install-agents.sh` | Shared installer for Claude Code + Codex + OpenCode + `/etc/profile.d/agents-banner.sh`. Copied into the VM via `smolvm machine cp`, then run via `smolvm machine exec -- bash /tmp/_install-agents.sh` (`bash -s < file` doesn't work — smolvm exec doesn't forward host stdin). One file, edited once, picked up by every blueprint. |
 | `blueprints/_install-user.sh` | Drops `/usr/local/sbin/match-host-uid.sh` into the VM at build time. That script runs on every VM start (via smolvm `--init` set by `dev-instance create`) and creates a `dev` user matching `$HOST_UID`/`$HOST_GID`. Same `cp + exec` plumbing as `_install-agents.sh`. |
 | `CHANGELOG.md` | Keep-a-Changelog format. Update the `[Unreleased]` / next-version section as part of any user-visible change. |
-| `wip/issue-fedora-overlay*.md` | Bug report and follow-up comment filed upstream as [smol-machines/smolvm#263](https://github.com/smol-machines/smolvm/issues/263). Kept as reference until the fix lands — no Fedora blueprint until then. |
+| `wip/` | Drafts of upstream bug reports + comments. `issue-fedora-overlay*.md` was filed as [smolvm#263](https://github.com/smol-machines/smolvm/issues/263) (partially fixed in 0.7.0); `issue-fedora-pack-extract-still-broken.md` was filed as [smolvm#278](https://github.com/smol-machines/smolvm/issues/278) for the residual case; `issue-cp-reverts-pack-fs.md` was filed as [smolvm#264](https://github.com/smol-machines/smolvm/issues/264) (fixed in 0.7.0); `issue-smolvm-pack-short-name-panic.md` was filed as [smolvm#277](https://github.com/smol-machines/smolvm/issues/277); `comment-smolvm-156.md` was posted on the still-open [smolvm#156](https://github.com/smol-machines/smolvm/issues/156); `issue-papercuts.md` lists smaller findings yet to file. Kept for historical reference. |
 | `LICENSE` | MIT. |
 | `.gitignore` | Excludes `dist/` plus any stray `.smolmachine` and legacy pack-stub binaries at the repo root. |
 
@@ -344,13 +344,21 @@ overwrite an existing `blueprints/<name>/`.
 
 ## Distros and trade-offs
 
-- **Fedora is currently blocked.** First by [#256](https://github.com/smol-machines/smolvm/issues/256)
-  (fixed in 0.6.3), now by [#263](https://github.com/smol-machines/smolvm/issues/263)
-  — overlay tars produced after any `dnf install` contain OverlayFS
-  char-device whiteouts that the macOS pack extractor can't recreate as a
-  non-root user. A no-op Fedora pack extracts fine, but any package
-  changes make it unextractable. No Fedora blueprint is shipped here
-  until #263 lands; the bug reports are in `wip/`.
+- **Fedora is still mostly blocked as of smolvm 0.7.0.**
+  [#256](https://github.com/smol-machines/smolvm/issues/256) (fixed
+  in 0.6.3) is gone, and the surface-level form of
+  [#263](https://github.com/smol-machines/smolvm/issues/263) is gone
+  in 0.7.0 — but the bug actually persists for any Fedora overlay
+  that includes real `dnf install` content (any non-trivial
+  transaction triggers package upgrades of base libs, which create
+  OverlayFS whiteouts the macOS pack extractor still can't handle).
+  Packs whose overlay is empty / no-op extract fine; populated
+  packs don't. We tried adding a `fedora-bun-node` blueprint and
+  immediately hit this. The continuation of #263 is filed as
+  [smolvm#278](https://github.com/smol-machines/smolvm/issues/278)
+  (local draft at `wip/issue-fedora-pack-extract-still-broken.md`,
+  original drafts in `wip/issue-fedora-overlay*.md`). Hold off on
+  a Fedora blueprint until #278 lands.
 - **Alpine works** and produces a smaller pack (~150–200 MB), but
   musl-vs-glibc occasionally makes `npm install` of random native modules
   compile from source. glibc (Ubuntu / Debian) just works for arbitrary
